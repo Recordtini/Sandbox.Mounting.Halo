@@ -1,0 +1,27 @@
+{
+  "GameObjects": [
+    {
+      "Id": "85020198-842e-4363-8740-44a045952327",
+      "Name": "Camera",
+      "Position": "0,0,100",
+      "Components": [
+        {
+          "__type": "Sandbox.CameraComponent",
+          "FieldOfView": 60,
+          "IsMainCamera": true
+        }
+      ]
+    },
+    {
+      "Id": "9e1c0288-6623-4414-8740-44a045952328",
+      "Name": "Sun",
+      "Rotation": "-0.25,0.25,0,1",
+      "Components": [
+        {
+          "__type": "Sandbox.DirectionalLight",
+          "LightColor": "1,1,1,1"
+        }
+      ]
+    }
+  ]
+}
