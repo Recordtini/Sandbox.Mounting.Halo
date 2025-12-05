@@ -31,110 +31,48 @@ public class HaloTexture : ResourceLoader<HaloMount>
 		}
 		using var reader = new BinaryReader( stream );
 
-		// Scan for BitmapData block
-		// Heuristic: Look for [Count] [Ptr] [Pad] where Count > 0 and Ptr != 0
-		// BitmapData is usually the last block in the struct.
+		// The Bitmap tag structure (from c20-master/bitmap.yml):
+		// Total size: 108 bytes
+		// bitmap_group_sequence (Block) is at offset 84 (12 bytes)
+		// bitmap_data (Block) is at offset 96 (12 bytes)
+		// Block = [Count(4)] [Ptr(4)] [Pad(4)]
 		
-		// Read tag data into buffer
-		// Note: stream is already positioned at the start of the tag data by GetTagStream
-		var buffer = reader.ReadBytes( 512 ); // Read enough bytes (increased to 512)
+		// Read and dump tag data for debugging
+		var buffer = reader.ReadBytes( 200 ); // Read extra to see what's there
 		
-		int bitmapDataCount = 0;
-		uint bitmapDataPtr = 0;
-
-		int foundOffset = -1;
-		int foundCount = 0;
-		uint foundPtr = 0;
-
-		// Start scanning from 100 to avoid false positives in the header
-		for ( int i = 100; i <= buffer.Length - 12; i += 4 )
+		// Hex dump first 200 bytes
+		var hexDump = "";
+		for ( int i = 0; i < buffer.Length; i++ )
 		{
-			var count = BitConverter.ToInt32( buffer, i );
-			var ptr = BitConverter.ToUInt32( buffer, i + 4 );
-			var pad = BitConverter.ToUInt32( buffer, i + 8 );
-
-			// Check for valid block pattern
-			if ( count > 0 && count < 100 && ptr > 0x10000 && pad == 0 )
-			{
-				Log.Info( $"[HaloTexture] Candidate at {i}: Count={count} Ptr={ptr:X}" );
-				
-				// Verify if this points to a BitmapData struct
-				var offset = Map.GetFileOffset( ptr );
-				if ( offset > 0 )
-				{
-					using var checkStream = File.OpenRead( Map.FilePath );
-					using var checkReader = new BinaryReader( checkStream );
-					checkStream.Seek( offset, SeekOrigin.Begin );
-					
-					var debugBytes = checkReader.ReadBytes( 32 );
-					var debugStr = "";
-					for(int b=0; b<debugBytes.Length; b++) debugStr += $"{debugBytes[b]:X2} ";
-					Log.Info( $"[HaloTexture] Candidate at {i} Data: {debugStr}" );
-					
-					checkStream.Seek( offset, SeekOrigin.Begin );
-					var firstWord = checkReader.ReadUInt32();
-					
-					// Check for 'bitm' signature
-					if ( firstWord == 0x6D746962 )
-					{
-						Log.Info( $"[HaloTexture] Valid BitmapData found at {i} (Signature Match)" );
-						foundOffset = i;
-						foundCount = count;
-						foundPtr = ptr;
-						break;
-					}
-					
-					// Check for reasonable dimensions (Width/Height)
-					// If class is missing, first 4 bytes are Width (16) and Height (16)
-					var checkWidth = (ushort)(firstWord & 0xFFFF);
-					var checkHeight = (ushort)((firstWord >> 16) & 0xFFFF);
-					
-					if ( checkWidth > 0 && checkWidth <= 8192 && checkHeight > 0 && checkHeight <= 8192 )
-					{
-						// Read next fields to be sure
-						// Depth (2), Type (2), Format (2)
-						var checkDepth = checkReader.ReadUInt16();
-						var checkType = checkReader.ReadUInt16();
-						var checkFormat = checkReader.ReadUInt16();
-						
-						// Type: 0-5, Format: 0-17
-						if ( checkType <= 5 && checkFormat <= 17 )
-						{
-							Log.Info( $"[HaloTexture] Valid BitmapData found at {i} (Dimensions: {checkWidth}x{checkHeight}, Type: {checkType}, Format: {checkFormat})" );
-							foundOffset = i;
-							foundCount = count;
-							foundPtr = ptr;
-							// Don't break immediately, keep looking for better candidates? 
-							// Actually, if we found valid dimensions, it's likely the one.
-							// But 124 might be GroupSequence which also points to data.
-							// GroupSequence points to BitmapGroupSprite.
-							// BitmapGroupSprite: BitmapIndex (2), Pad (2), Pad (4), Left (4)...
-							// BitmapIndex is usually small.
-							// Let's prefer the one that looks most like a BitmapData.
-							
-							// If we found one, let's take it.
-							break;
-						}
-					}
-					
-					Log.Info( $"[HaloTexture] Candidate at {i} rejected: {firstWord:X8}" );
-				}
-			}
+			if ( i > 0 && i % 16 == 0 ) hexDump += "\n";
+			hexDump += $"{buffer[i]:X2} ";
 		}
-
-		if ( foundOffset != -1 )
+		Log.Info( $"[HaloTexture] Tag Data Dump:\n{hexDump}" );
+		
+		if ( buffer.Length < 108 )
 		{
-			Log.Info( $"[HaloTexture] Found Block at {foundOffset}: Count={foundCount} Ptr={foundPtr:X}" );
-			bitmapDataCount = foundCount;
-			bitmapDataPtr = foundPtr;
-		}
-		else
-		{
-			Log.Warning( "[HaloTexture] Could not find BitmapData block via scanning." );
+			Log.Warning( $"[HaloTexture] Tag data too short: {buffer.Length} bytes" );
 			return null;
 		}
+		
+		// Based on hex dump analysis:
+		// Offset 64-79 seems to contain width/height data
+		// Offset 124: bitmap_group_sequence (Block)
+		// Offset 136: bitmap_data (Block)
+		
+		// Use offset 136 for bitmap_data
+		var bitmapDataCount = BitConverter.ToInt32( buffer, 136 );
+		var bitmapDataPtr = BitConverter.ToUInt32( buffer, 140 );
+		
+		Log.Info( $"[HaloTexture] bitmap_data Block at 136: Count={bitmapDataCount} Ptr={bitmapDataPtr:X}" );
 
-		if ( bitmapDataCount == 0 )
+		if ( bitmapDataCount == 0 || bitmapDataPtr == 0 )
+		{
+			// Fallback: try offset 124
+			bitmapDataCount = BitConverter.ToInt32( buffer, 124 );
+			bitmapDataPtr = BitConverter.ToUInt32( buffer, 128 );
+			Log.Info( $"[HaloTexture] Trying offset 124: Count={bitmapDataCount} Ptr={bitmapDataPtr:X}" );
+		}
 
 		if ( bitmapDataCount == 0 )
 		{
@@ -153,20 +91,34 @@ public class HaloTexture : ResourceLoader<HaloMount>
 		using var mapStream = File.OpenRead( Map.FilePath );
 		using var mapReader = new BinaryReader( mapStream );
 		
-		mapStream.Seek( bitmapDataOffset, SeekOrigin.Begin );
+		mapStream.Seek( bitmapDataOffset + 40, SeekOrigin.Begin ); // BitmapData starts 40 bytes into the block
 		
-		mapReader.ReadInt32(); // Class
-		var width = mapReader.ReadUInt16();
-		var height = mapReader.ReadUInt16();
-		var depth = mapReader.ReadUInt16();
-		var type = mapReader.ReadUInt16();
-		var format = mapReader.ReadUInt16();
-		var flags = mapReader.ReadUInt16();
-		mapReader.ReadInt32(); // RegPoint
-		var mipmapCount = mapReader.ReadUInt16();
-		mapReader.ReadUInt16(); // Pad
-		var pixelDataOffset = mapReader.ReadUInt32();
-		var pixelDataSize = mapReader.ReadUInt32();
+		// Debug: dump first 48 bytes of BitmapData
+		var bitmapDataDebug = mapReader.ReadBytes( 48 );
+		var debugStr = "";
+		for ( int b = 0; b < bitmapDataDebug.Length; b++ )
+		{
+			if ( b > 0 && b % 16 == 0 ) debugStr += "\n";
+			debugStr += $"{bitmapDataDebug[b]:X2} ";
+		}
+		Log.Info( $"[HaloTexture] BitmapData at offset {bitmapDataOffset}:\n{debugStr}" );
+		
+		// Parse the BitmapData struct (48 bytes)
+		var bitmapClass = BitConverter.ToUInt32( bitmapDataDebug, 0 ); // bitmap_class
+		var width = BitConverter.ToUInt16( bitmapDataDebug, 4 );
+		var height = BitConverter.ToUInt16( bitmapDataDebug, 6 );
+		var depth = BitConverter.ToUInt16( bitmapDataDebug, 8 );
+		var type = BitConverter.ToUInt16( bitmapDataDebug, 10 );
+		var format = BitConverter.ToUInt16( bitmapDataDebug, 12 );
+		var flags = BitConverter.ToUInt16( bitmapDataDebug, 14 );
+		var regX = BitConverter.ToInt16( bitmapDataDebug, 16 );
+		var regY = BitConverter.ToInt16( bitmapDataDebug, 18 );
+		var mipmapCount = BitConverter.ToUInt16( bitmapDataDebug, 20 );
+		// pad at 22
+		var pixelDataOffset = BitConverter.ToUInt32( bitmapDataDebug, 24 );
+		var pixelDataSize = BitConverter.ToUInt32( bitmapDataDebug, 28 );
+		
+		Log.Info( $"[HaloTexture] BitmapData: Class={bitmapClass:X8} {width}x{height}x{depth} Type={type} Fmt={format} Flags={flags} Mipmaps={mipmapCount} PixOff={pixelDataOffset:X} PixSize={pixelDataSize}" );
 
 		if ( pixelDataSize == 0 )
 		{
@@ -174,9 +126,35 @@ public class HaloTexture : ResourceLoader<HaloMount>
 			return null;
 		}
 
-		// Read Pixels
-		mapStream.Seek( pixelDataOffset, SeekOrigin.Begin );
-		var pixelData = mapReader.ReadBytes( (int)pixelDataSize );
+		// Read Pixels - may be in map file or in external bitmaps.map
+		byte[] pixelData;
+		var mapFileInfo = new FileInfo( Map.FilePath );
+		
+		// Check if offset is within this map file
+		if ( pixelDataOffset < (uint)mapFileInfo.Length )
+		{
+			// Pixel data is in this map file
+			mapStream.Seek( pixelDataOffset, SeekOrigin.Begin );
+			pixelData = mapReader.ReadBytes( (int)pixelDataSize );
+		}
+		else
+		{
+			// Pixel data is likely in external bitmaps.map
+			var mapsDir = System.IO.Path.GetDirectoryName( Map.FilePath );
+			var bitmapsMapPath = System.IO.Path.Combine( mapsDir, "bitmaps.map" );
+			
+			if ( !File.Exists( bitmapsMapPath ) )
+			{
+				Log.Warning( $"[HaloTexture] External bitmaps.map not found at {bitmapsMapPath}" );
+				return null;
+			}
+			
+			using var bitmapsStream = File.OpenRead( bitmapsMapPath );
+			using var bitmapsReader = new BinaryReader( bitmapsStream );
+			
+			bitmapsStream.Seek( pixelDataOffset, SeekOrigin.Begin );
+			pixelData = bitmapsReader.ReadBytes( (int)pixelDataSize );
+		}
 		
 		// Construct DDS Header
 		var ddsHeader = CreateDDSHeader( width, height, mipmapCount, format );
